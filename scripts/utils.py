@@ -1,28 +1,16 @@
+import pandas as pd
 import numpy as np
 
-
 def get_anchor_and_scale(pose_landmarks):
-    """
-    Calcula el ancla espacial (centro del pecho) y el factor de escala (distancia entre hombros).
-    
-    Esta normalización permite que las coordenadas extraídas sean invariantes 
-    a la distancia de la persona respecto a la cámara y a su complexión física.
-
-    Args:
-        pose_landmarks (Any): Objeto de MediaPipe que contiene los hitos (landmarks) de la pose detectada.
-
-    Returns:
-        Tuple[np.ndarray, float]: 
-            - anchor (np.array): Array 1D con las coordenadas (x, y, z) del punto central.
-            - scale (float): Valor numérico de la distancia euclidiana entre los hombros.
-    """
+    """Calcula el ancla (centro del pecho) y la escala (distancia entre hombros)."""
     if not pose_landmarks:
         return np.array([0.0, 0.0, 0.0]), 1.0
     
-    l_shldr = pose_landmarks.landmark
-    r_shldr = pose_landmarks.landmark
+    # ¡AQUÍ ESTABA EL ERROR! Faltaban los índices [1] y [2]
+    l_shldr = pose_landmarks.landmark[1] # Hombro izquierdo
+    r_shldr = pose_landmarks.landmark[2] # Hombro derecho
     
-    #Normalización de Traslación: Punto medio entre los hombros
+    # Normalización de Traslación: Punto medio entre los hombros
     anchor = np.array([(l_shldr.x + r_shldr.x) / 2, 
                        (l_shldr.y + r_shldr.y) / 2, 
                        (l_shldr.z + r_shldr.z) / 2])
@@ -30,7 +18,7 @@ def get_anchor_and_scale(pose_landmarks):
     # Normalización de Escala: Distancia Euclidiana 2D entre hombros
     scale = np.sqrt((l_shldr.x - r_shldr.x)**2 + (l_shldr.y - r_shldr.y)**2)
     
-    # Evitar división por cero si MediaPipe falla y pone los hombros en el mismo pixel
+    # Evitar división por cero si MediaPipe falla
     if scale < 1e-5: 
         scale = 1.0
         
@@ -59,3 +47,29 @@ def normalize_landmarks(landmarks_flat, anchor, scale):
     
     # Volvemos a aplanar a 1D
     return pts_norm.flatten()
+
+def interpolar_secuencia(secuencia_data: np.ndarray) -> np.ndarray:
+    """
+    Rellena los fotogramas perdidos (donde MediaPipe devolvió ceros) 
+    utilizando interpolación lineal temporal.
+    
+    Args:
+        secuencia_data (np.ndarray): Matriz de landmarks original con posibles ceros.
+        
+    Returns:
+        np.ndarray: Matriz con las trayectorias de movimiento suavizadas e imputadas.
+    """
+    # Convertimos la matriz a un DataFrame de Pandas para usar sus herramientas temporales
+    df = pd.DataFrame(secuencia_data)
+    
+    # Reemplazamos los ceros por NaN (Not a Number) para que Pandas sepa dónde faltan datos
+    df.replace(0.0, np.nan, inplace=True)
+    
+    # Aplicamos interpolación lineal. 'limit_direction='both'' copia el fotograma más cercano 
+    # si la mano faltaba justo en el primer o último fotograma del video.
+    df.interpolate(method='linear', limit_direction='both', inplace=True)
+    
+    # Si una mano no apareció en TODO el video, quedarán NaNs. Los devolvemos a 0.0 por seguridad.
+    df.fillna(0.0, inplace=True)
+    
+    return df.to_numpy()
