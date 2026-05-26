@@ -1,75 +1,97 @@
 import pandas as pd
 import numpy as np
+from typing import Tuple, List, Any
 
-def get_anchor_and_scale(pose_landmarks):
-    """Calcula el ancla (centro del pecho) y la escala (distancia entre hombros)."""
+def get_anchor_and_scale(pose_landmarks: Any) -> Tuple[np.ndarray, float]:
+    """
+    Calculates the spatial anchor (midpoint of the chest) and the reference scale
+    using the shoulder coordinates.
+
+    Args:
+        pose_landmarks: MediaPipe object containing pose landmarks.
+
+    Returns:
+        Tuple[np.ndarray, float]: A 3D vector (x, y, z) with the translation point
+        and a float with the Euclidean scale factor.
+    """
     if not pose_landmarks:
         return np.array([0.0, 0.0, 0.0]), 1.0
-    
-    # ¡AQUÍ ESTABA EL ERROR! Faltaban los índices [1] y [2]
-    l_shldr = pose_landmarks.landmark[1] # Hombro izquierdo
-    r_shldr = pose_landmarks.landmark[2] # Hombro derecho
-    
-    # Normalización de Traslación: Punto medio entre los hombros
-    anchor = np.array([(l_shldr.x + r_shldr.x) / 2, 
-                       (l_shldr.y + r_shldr.y) / 2, 
-                       (l_shldr.z + r_shldr.z) / 2])
-    
-    # Normalización de Escala: Distancia Euclidiana 2D entre hombros
-    scale = np.sqrt((l_shldr.x - r_shldr.x)**2 + (l_shldr.y - r_shldr.y)**2)
-    
-    # Evitar división por cero si MediaPipe falla
-    if scale < 1e-5: 
+
+    # Standard MediaPipe Pose indices for shoulders
+    # Extract nodes corresponding to the left and right shoulders
+    left_shoulder = pose_landmarks.landmark[11]
+    right_shoulder = pose_landmarks.landmark[12]
+
+    # Translation: Exact midpoint between both shoulders (skeleton origin)
+    anchor = np.array([
+        (left_shoulder.x + right_shoulder.x) / 2.0,
+        (left_shoulder.y + right_shoulder.y) / 2.0,
+        (left_shoulder.z + right_shoulder.z) / 2.0
+    ])
+
+    # Scale: 2D Euclidean distance (X, Y) to mitigate depth distortions
+    scale = float(np.sqrt(
+        (left_shoulder.x - right_shoulder.x) ** 2 +
+        (left_shoulder.y - right_shoulder.y) ** 2
+    ))
+
+    # Protect the pipeline against division by zero if MediaPipe fails critically
+    if scale < 1e-5:
         scale = 1.0
-        
+
     return anchor, scale
 
 
-def normalize_landmarks(landmarks_flat, anchor, scale):
+
+def normalize_spatial_points(
+    flat_landmarks: np.ndarray, 
+    anchor: np.ndarray, 
+    scale: float
+) -> np.ndarray:
     """
-    Normaliza un vector de coordenadas 1D restando el ancla y dividiendo por la escala.
+    Applies translation and scaling to a 1D vector of landmarks.
 
     Args:
-        landmarks_flat (np.array): Vector 1D plano que contiene las coordenadas espaciales.
-        anchor (np.array): Vector 1D con el origen de coordenadas (x, y, z).
-        scale (float): Factor de escala de referencia del torso.
+        flat_landmarks (np.ndarray): 1D vector with sequential coordinates.
+        anchor (np.ndarray): 1D vector (X, Y, Z) with the center of the chest.
+        scale (float): Inter-shoulder scale divisor factor.
 
     Returns:
-        np.array: Vector 1D con los landmarks normalizados espacialmente.
+        np.ndarray: Normalized and flattened 1D vector.
     """
-    # Si el vector es todo ceros (no se detectó la parte del cuerpo), lo dejamos así
-    if np.all(landmarks_flat == 0):
-        return landmarks_flat
-    
-    # Reconstruimos a (N, 3) para la resta matemática
-    pts = landmarks_flat.reshape(-1, 3)
-    pts_norm = (pts - anchor) / scale
-    
-    # Volvemos a aplanar a 1D
-    return pts_norm.flatten()
+    # If the vector is all zeros, it means MediaPipe didn't detect the entity
+    if np.all(flat_landmarks == 0.0):
+        return flat_landmarks
 
-def interpolar_secuencia(secuencia_data: np.ndarray) -> np.ndarray:
+    # Temporarily reshape to a 3D matrix (N, 3) for vector operations
+    points = flat_landmarks.reshape(-1, 3)
+    normalized_points = (points - anchor) / scale
+
+    return normalized_points.flatten()
+
+
+def uniform_subsampling(sequence_data: List[np.ndarray], target_frames: int = 16) -> np.ndarray:
     """
-    Rellena los fotogramas perdidos (donde MediaPipe devolvió ceros) 
-    utilizando interpolación lineal temporal.
-    
+    Temporally compresses the variable-length frame sequence 
+    to a fixed size using uniformly spaced sampling.
+
     Args:
-        secuencia_data (np.ndarray): Matriz de landmarks original con posibles ceros.
-        
+        sequence_data (List[np.ndarray]): List of arrays with processed frames.
+        target_frames (int): Target number of frames for the TinyTransformer.
+
     Returns:
-        np.ndarray: Matriz con las trayectorias de movimiento suavizadas e imputadas.
+        np.ndarray: Dense matrix of shape (target_frames, 225).
     """
-    # Convertimos la matriz a un DataFrame de Pandas para usar sus herramientas temporales
-    df = pd.DataFrame(secuencia_data)
+    total_frames = len(sequence_data)
+
+    # Exception handling for empty or corrupt video files
+    if total_frames == 0:
+        return np.zeros((target_frames, 225), dtype=np.float32)
+
+    # Generate equally spaced indices distributed throughout the footage
+    indices = np.linspace(0, total_frames - 1, target_frames, dtype=int)
     
-    # Reemplazamos los ceros por NaN (Not a Number) para que Pandas sepa dónde faltan datos
-    df.replace(0.0, np.nan, inplace=True)
+    # Build the final matrix by indexing the original list
+    filtered_sequence = [sequence_data[idx] for idx in indices]
     
-    # Aplicamos interpolación lineal. 'limit_direction='both'' copia el fotograma más cercano 
-    # si la mano faltaba justo en el primer o último fotograma del video.
-    df.interpolate(method='linear', limit_direction='both', inplace=True)
-    
-    # Si una mano no apareció en TODO el video, quedarán NaNs. Los devolvemos a 0.0 por seguridad.
-    df.fillna(0.0, inplace=True)
-    
-    return df.to_numpy()
+    return np.array(filtered_sequence, dtype=np.float32)
